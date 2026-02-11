@@ -1,0 +1,349 @@
+# utils_copulas.py
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from typing import overload
+
+import numpy as np
+from numpy.typing import NDArray
+from scipy.stats import norm
+
+ArrayF = NDArray[np.floating]
+
+# ---------- Exercise 2 functions ---------
+def _validate_params(a: float, b: float, c: float) -> None:
+    if not (a < c < b):
+        raise ValueError(f"Require a < c < b, got a={a}, c={c}, b={b}.")
+
+
+def tri_pdf(x: ArrayF, a: float, b: float, c: float) -> ArrayF:
+    """
+    PDF of Triangular(a,b,c).
+
+    Parameters
+    ----------
+    x : array-like
+        Evaluation points.
+    a, b, c : float
+        Parameters with a < c < b.
+
+    Returns
+    -------
+    pdf : np.ndarray
+        PDF values at x.
+    """
+    _validate_params(a, b, c)
+    x = np.asarray(x, dtype=float)
+
+    pdf = np.zeros_like(x, dtype=float)
+
+    left = (x >= a) & (x <= c)
+    right = (x >= c) & (x <= b)
+
+    pdf[left] = 2.0 * (x[left] - a) / ((b - a) * (c - a))
+    pdf[right] = 2.0 * (b - x[right]) / ((b - a) * (b - c))
+
+    return pdf
+
+
+def tri_ppf(u: ArrayF, a: float, b: float, c: float) -> ArrayF:
+    """
+    Quantile function (inverse CDF) of Triangular(a,b,c).
+    """
+    _validate_params(a, b, c)
+    u = np.asarray(u, dtype=float)
+
+    if np.any((u < 0.0) | (u > 1.0)):
+        raise ValueError("u must be in [0,1].")
+
+    p = (c - a) / (b - a)
+
+    x = np.empty_like(u, dtype=float)
+
+    left = u <= p
+    right = ~left
+
+    x[left] = a + np.sqrt(u[left] * (b - a) * (c - a))
+    x[right] = b - np.sqrt((1.0 - u[right]) * (b - a) * (b - c))
+
+    return x
+
+
+def tri_rvs(a: float, b: float, c: float, *, size: int, seed: int | None = None) -> ArrayF:
+    """
+    Draw samples from Triangular(a,b,c) via inverse transform sampling.
+    """
+    _validate_params(a, b, c)
+    rng = np.random.default_rng(seed)
+    u = rng.random(size)
+    return tri_ppf(u, a, b, c)
+
+try:
+    from scipy.stats import norm
+except ImportError as e:
+    raise ImportError("Se requiere scipy: pip install scipy") from e
+
+
+# ---------- Exercise 7 functions ----------
+def gaussian_copula_uv(*, rho: float, size: int, seed: int | None = None) -> tuple[ArrayF, ArrayF]:
+    if not (-1.0 < rho < 1.0):
+        raise ValueError("Require -1 < rho < 1.")
+
+    rng = np.random.default_rng(seed)
+
+    # U2 ~ U(0,1)
+    u2 = rng.random(size)
+    z2 = norm.ppf(u2)
+
+    # E ~ N(0,1) via inverse transform
+    e = norm.ppf(rng.random(size))
+
+    # Z1 | Z2=z2 ~ N(rho z2, 1-rho^2)
+    z1 = rho * z2 + np.sqrt(1.0 - rho**2) * e
+    u1 = norm.cdf(z1)
+
+    return u1, u2
+
+def check_normalization(alpha: float, beta: float, gamma: float, *, tol: float = 1e-10) -> None:
+    mass = 13.5 * alpha + 6.75 * beta + 3.375 * gamma
+    if not np.isclose(mass, 1.0, atol=tol, rtol=0.0):
+        raise ValueError(f"No normalizado: 13.5α+6.75β+3.375γ = {mass} (debe ser 1).")
+
+
+def f1_pdf(x: ArrayF, alpha: float, beta: float, gamma: float) -> ArrayF:
+    x = np.asarray(x, dtype=float)
+    out = np.zeros_like(x, dtype=float)
+    mask = (x >= -1.0) & (x <= 2.0)
+    out[mask] = 4.5 * (alpha + beta * x[mask]) + 1.125 * gamma
+    return out
+
+
+def f2_pdf(y: ArrayF, alpha: float, beta: float, gamma: float) -> ArrayF:
+    y = np.asarray(y, dtype=float)
+    out = np.zeros_like(y, dtype=float)
+    mask = (y >= -2.0) & (y <= 2.5)
+    out[mask] = 3.0 * (alpha + gamma * y[mask]) + 1.5 * beta
+    return out
+
+
+def F1_cdf(x: ArrayF, alpha: float, beta: float, gamma: float) -> ArrayF:
+    x = np.asarray(x, dtype=float)
+    out = np.zeros_like(x, dtype=float)
+
+    A = 4.5 * alpha + 1.125 * gamma   # constant term in f1
+    B = 4.5 * beta                    # slope term in f1
+
+    out[x >= 2.0] = 1.0
+    mid = (x > -1.0) & (x < 2.0)
+    xm = x[mid]
+    out[mid] = A * (xm + 1.0) + 0.5 * B * (xm**2 - 1.0)
+    return out
+
+
+def F2_cdf(y: ArrayF, alpha: float, beta: float, gamma: float) -> ArrayF:
+    y = np.asarray(y, dtype=float)
+    out = np.zeros_like(y, dtype=float)
+
+    A = 3.0 * alpha + 1.5 * beta      # constant term in f2
+    B = 3.0 * gamma                   # slope term in f2
+
+    out[y >= 2.5] = 1.0
+    mid = (y > -2.0) & (y < 2.5)
+    ym = y[mid]
+    out[mid] = A * (ym + 2.0) + 0.5 * B * (ym**2 - 4.0)
+    return out
+
+def _ppf_linear_pdf_on_interval(u: ArrayF, *, L: float, U: float, A: float, B: float) -> ArrayF:
+    u = np.asarray(u, dtype=float)
+    if np.any((u < 0.0) | (u > 1.0)):
+        raise ValueError("u must be in [0,1].")
+
+    # If B ~ 0 -> uniform on [L,U]
+    if np.isclose(B, 0.0):
+        # then CDF(x)=A(x-L), and A must be 1/(U-L)
+        return L + u / A
+
+    # Solve: A(x-L) + 0.5 B(x^2 - L^2) = u
+    # => 0.5B x^2 + A x - (A L + 0.5B L^2 + u) = 0
+    aq = 0.5 * B
+    bq = A
+    cq = -(A * L + 0.5 * B * L**2 + u)
+
+    disc = bq**2 - 4.0 * aq * cq
+    if np.any(disc < -1e-12):
+        raise ValueError("Discriminante negativo: revisa parámetros (pdf puede no ser válida).")
+    disc = np.maximum(disc, 0.0)
+
+    sqrt_disc = np.sqrt(disc)
+    x1 = (-bq + sqrt_disc) / (2.0 * aq)
+    x2 = (-bq - sqrt_disc) / (2.0 * aq)
+
+    # Elegir la raíz dentro de [L,U]
+    in1 = (x1 >= L - 1e-12) & (x1 <= U + 1e-12)
+    in2 = (x2 >= L - 1e-12) & (x2 <= U + 1e-12)
+
+    x = np.where(in1 & ~in2, x1, np.where(in2 & ~in1, x2, x1))
+
+    # Clamp final por robustez numérica
+    return np.clip(x, L, U)
+
+
+def F1_ppf(u: ArrayF, alpha: float, beta: float, gamma: float) -> ArrayF:
+    A = 4.5 * alpha + 1.125 * gamma
+    B = 4.5 * beta
+    return _ppf_linear_pdf_on_interval(u, L=-1.0, U=2.0, A=A, B=B)
+
+
+def F2_ppf(u: ArrayF, alpha: float, beta: float, gamma: float) -> ArrayF:
+    A = 3.0 * alpha + 1.5 * beta
+    B = 3.0 * gamma
+    return _ppf_linear_pdf_on_interval(u, L=-2.0, U=2.5, A=A, B=B)
+
+def portfolio_returns(r1: ArrayF, r2: ArrayF, *, w1: float = 0.25, w2: float = 0.75) -> ArrayF:
+    if not np.isclose(w1 + w2, 1.0):
+        raise ValueError("Weights must sum to 1.")
+    return w1 * r1 + w2 * r2
+
+
+def var_left_tail(returns: ArrayF, alpha: float) -> float:
+    q = float(np.quantile(returns, alpha))
+    return -q
+
+
+def normal_fit_pdf(x: ArrayF, grid: ArrayF) -> tuple[float, float, ArrayF]:
+    mu = float(np.mean(x))
+    sigma = float(np.std(x, ddof=1))
+    return mu, sigma, norm.pdf(grid, loc=mu, scale=sigma)
+
+# ---------- Exercise 8 functions ----------
+def gaussian_quantile_curve_r2(
+    r1: np.ndarray,
+    *,
+    q: float,
+    rho: float,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """
+    Curva cuantil q bajo cópula Gaussiana:
+      u1 = F1(r1)
+      u2 = Phi( rho Phi^{-1}(u1) + sqrt(1-rho^2) Phi^{-1}(q) )
+      r2 = F2^{-1}(u2)
+
+    Usa las marginales derivadas del pdf (I): F1_cdf y F2_ppf (ya definidas en utils.py).
+    """
+    if not (0.0 < q < 1.0):
+        raise ValueError("q must be in (0,1).")
+    if not (-1.0 < rho < 1.0):
+        raise ValueError("Require -1 < rho < 1.")
+
+    # F1(r1) y estabilización para evitar ±inf en Phi^{-1}
+    u1 = F1_cdf(r1, alpha, beta, gamma)
+    u1 = np.clip(u1, eps, 1.0 - eps)
+
+    z1 = norm.ppf(u1)
+    zq = norm.ppf(q)
+
+    u2 = norm.cdf(rho * z1 + np.sqrt(1.0 - rho**2) * zq)
+    u2 = np.clip(u2, eps, 1.0 - eps)
+
+    r2 = F2_ppf(u2, alpha, beta, gamma)
+    return r2
+
+# ------------------------- Exercise 10 functions -------------------------
+def clayton_copula_uv(*, theta: float, size: int, seed: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Simula (U1,U2) con cópula Clayton(theta) usando muestreo condicional.
+
+    Fórmula (de tu Ej.10): si W ~ U(0,1) independiente de U1,
+      U2 = ( 1 + U1^{-theta} * ( W^{-theta/(1+theta)} - 1 ) )^{-1/theta}.
+    """
+    if theta <= 0.0:
+        raise ValueError("theta must be > 0.")
+    rng = np.random.default_rng(seed)
+
+    u1 = rng.random(size)
+    w = rng.random(size)
+
+    a = w ** (-theta / (1.0 + theta)) - 1.0
+    u2 = (1.0 + (u1 ** (-theta)) * a) ** (-1.0 / theta)
+
+    # robustez numérica
+    eps = 1e-12
+    u1 = np.clip(u1, eps, 1.0 - eps)
+    u2 = np.clip(u2, eps, 1.0 - eps)
+    return u1, u2
+
+
+def clayton_returns_from_pdfI(
+    *,
+    theta: float,
+    size: int,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    seed: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Simula (R1,R2) con dependencia Clayton(theta) y marginales del pdf (I):
+      R1 = F1^{-1}(U1), R2 = F2^{-1}(U2).
+    Devuelve (R1,R2,U1,U2).
+    """
+    u1, u2 = clayton_copula_uv(theta=theta, size=size, seed=seed)
+    r1 = F1_ppf(u1, alpha, beta, gamma)
+    r2 = F2_ppf(u2, alpha, beta, gamma)
+    return r1, r2, u1, u2
+
+def clayton_quantile_curve_r2(
+    r1: np.ndarray,
+    *,
+    q: float,
+    theta: float,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """
+    Curva cuantil q para cópula Clayton condicional:
+
+      u1 = F1(r1)
+      u2 = ( 1 + u1^{-theta} * ( q^{-theta/(1+theta)} - 1 ) )^{-1/theta}
+      r2 = F2^{-1}(u2)
+
+    Marginales F1,F2 son las del pdf (I) implementadas previamente.
+    """
+    if not (0.0 < q < 1.0):
+        raise ValueError("q must be in (0,1).")
+    if theta <= 0.0:
+        raise ValueError("theta must be > 0.")
+
+    u1 = F1_cdf(r1, alpha, beta, gamma)
+    u1 = np.clip(u1, eps, 1.0 - eps)
+
+    a = q ** (-theta / (1.0 + theta)) - 1.0
+    u2 = (1.0 + (u1 ** (-theta)) * a) ** (-1.0 / theta)
+    u2 = np.clip(u2, eps, 1.0 - eps)
+
+    r2 = F2_ppf(u2, alpha, beta, gamma)
+    return r2
+
+
+def clayton_quantile_curve_u2(
+    u1: np.ndarray, *, q: float, theta: float, eps: float = 1e-12
+) -> np.ndarray:
+    """
+    Curva cuantil en el plano uniforme (u1,u2):
+      u2(u1;q) = ( 1 + u1^{-theta} * ( q^{-theta/(1+theta)} - 1 ) )^{-1/theta}
+    """
+    if not (0.0 < q < 1.0):
+        raise ValueError("q must be in (0,1).")
+    if theta <= 0.0:
+        raise ValueError("theta must be > 0.")
+    u1 = np.asarray(u1, float)
+    u1 = np.clip(u1, eps, 1.0 - eps)
+    a = q ** (-theta / (1.0 + theta)) - 1.0
+    u2 = (1.0 + (u1 ** (-theta)) * a) ** (-1.0 / theta)
+    return np.clip(u2, eps, 1.0 - eps)
