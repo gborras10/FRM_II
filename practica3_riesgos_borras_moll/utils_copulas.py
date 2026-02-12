@@ -6,7 +6,7 @@ from typing import overload
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.stats import norm
+from scipy.stats import norm, chi2, t
 
 ArrayF = NDArray[np.floating]
 
@@ -347,3 +347,105 @@ def clayton_quantile_curve_u2(
     a = q ** (-theta / (1.0 + theta)) - 1.0
     u2 = (1.0 + (u1 ** (-theta)) * a) ** (-1.0 / theta)
     return np.clip(u2, eps, 1.0 - eps)
+
+
+# ------------------------- Exercise 12 functions -------------------------
+def t_copula_uv(*, rho: float, nu: int, size: int, seed: int | None = None):
+    """
+    Simula (U1,U2) ~ t-copula con correlación rho y dof nu:
+      z ~ N(0, I), x = L z con cov(x)=Psi
+      s ~ chi2_nu indep
+      y = sqrt(nu/s) * x  -> multivar t
+      u_i = T_nu(y_i)
+    """
+    if not (-1.0 < rho < 1.0):
+        raise ValueError("Require -1 < rho < 1.")
+    if nu <= 0:
+        raise ValueError("nu must be positive.")
+
+    rng = np.random.default_rng(seed)
+
+    Psi = np.array([[1.0, rho], [rho, 1.0]])
+    L = np.linalg.cholesky(Psi)
+
+    z = rng.standard_normal((size, 2))
+    x = z @ L.T
+
+    s = chi2.rvs(df=nu, size=size, random_state=rng)
+    y = x * np.sqrt(nu / s)[:, None]
+
+    u = t.cdf(y, df=nu)
+    return u[:, 0], u[:, 1]
+
+
+# ------------------------------- Exercise 16 functions -------------------------------
+def C_G_cond(u2: float, u1: float, rho: float) -> float:
+    z2 = norm.ppf(u2)
+    z1 = norm.ppf(u1)
+    return norm.cdf((z2 - rho * z1) / np.sqrt(1.0 - rho**2))
+
+
+def C_NM_cond(u2: float, u1: float, *, pi: float, rho1: float, rho2: float) -> float:
+    return (
+        pi * C_G_cond(u2, u1, rho1)
+        + (1.0 - pi) * C_G_cond(u2, u1, rho2)
+    )
+
+def solve_u2_for_quantile(
+    u1: float,
+    q: float,
+    *,
+    pi: float,
+    rho1: float,
+    rho2: float,
+    tol: float = 1e-10,
+    maxiter: int = 100
+) -> float:
+
+    def f(u2: float) -> float:
+        return C_NM_cond(u2, u1, pi=pi, rho1=rho1, rho2=rho2) - q
+
+    lo, hi = 1e-12, 1.0 - 1e-12
+    flo, fhi = f(lo), f(hi)
+
+    if flo * fhi > 0:
+        return lo if abs(flo) < abs(fhi) else hi
+
+    for _ in range(maxiter):
+        mid = 0.5 * (lo + hi)
+        fmid = f(mid)
+
+        if abs(fmid) < tol:
+            return mid
+
+        if flo * fmid < 0:
+            hi = mid
+            fhi = fmid
+        else:
+            lo = mid
+            flo = fmid
+
+    return 0.5 * (lo + hi)
+
+def simulate_nm_copula(N, *, pi, rho1, rho2, seed=None):
+    rng = np.random.default_rng(seed)
+
+    # seleccionar componente
+    comp = rng.uniform(size=N) < pi
+
+    U = np.empty((N, 2))
+
+    for k, rho in enumerate([rho1, rho2]):
+        idx = (comp if k == 0 else ~comp)
+        n_k = np.sum(idx)
+        if n_k == 0:
+            continue
+
+        Psi = np.array([[1.0, rho], [rho, 1.0]])
+        L = np.linalg.cholesky(Psi)
+
+        z = rng.standard_normal((n_k, 2))
+        x = z @ L.T
+        U[idx] = norm.cdf(x)
+
+    return U[:, 0], U[:, 1]
