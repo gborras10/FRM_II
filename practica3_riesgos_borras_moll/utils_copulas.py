@@ -7,6 +7,7 @@ from typing import overload
 import numpy as np
 from numpy.typing import NDArray
 from scipy.stats import norm, chi2, t
+from scipy import integrate, optimize
 
 ArrayF = NDArray[np.floating]
 
@@ -83,6 +84,77 @@ try:
 except ImportError as e:
     raise ImportError("Se requiere scipy: pip install scipy") from e
 
+# ---------- Exercise 3 functions ----------
+
+alpha, beta, gamma = 0.0642, 0.0049, 0.0296
+r1_min, r1_max = -1, 2
+r2_min, r2_max = -2, 2.5
+
+def pdf_joint(r1, r2):
+    if (r1_min <= r1 <= r1_max) and (r2_min <= r2 <= r2_max):
+        return alpha + beta*r1 + gamma*r2
+    return 0.0
+
+def pdf_r1(r1):
+    res, _ = integrate.quad(lambda r2: pdf_joint(r1, r2), r2_min, r2_max)
+    return res
+
+def cdf_r1(r1):
+    res, _ = integrate.quad(pdf_r1, r1_min, r1)
+    return res
+
+# CORRECCIÓN: Inversa robusta ante errores de punto flotante
+def inv_cdf_r1(u):
+    if u <= 1e-6: return r1_min
+    if u >= 1 - 1e-6: return r1_max
+    # Verificamos los signos para evitar el error de brentq
+    f_max = cdf_r1(r1_max) - u
+    if f_max < 0: return r1_max # Si la integral no llega a u, devolvemos max
+    return optimize.brentq(lambda r: cdf_r1(r) - u, r1_min, r1_max)
+
+def pdf_r2(r2):
+    res, _ = integrate.quad(lambda r1: pdf_joint(r1, r2), r1_min, r1_max)
+    return res
+
+def cdf_r2(r2):
+    res, _ = integrate.quad(pdf_r2, r2_min, r2)
+    return res
+
+# CORRECCIÓN: Inversa robusta para R2
+def inv_cdf_r2(u):
+    if u <= 1e-6: return r2_min
+    if u >= 1 - 1e-6: return r2_max
+    f_max = cdf_r2(r2_max) - u
+    if f_max < 0: return r2_max
+    return optimize.brentq(lambda r: cdf_r2(r) - u, r2_min, r2_max)
+
+def cond_exp_r1_given_r2(r2_val):
+    denom = pdf_r2(r2_val)
+    if denom < 1e-8: return 0 # Evitar división por cero
+    num, _ = integrate.quad(lambda r1: r1 * pdf_joint(r1, r2_val), r1_min, r1_max)
+    return num / denom
+
+def cdf_cond_r1_given_r2(r1_target, r2_given):
+    denom = pdf_r2(r2_given)
+    if denom < 1e-8: return 0
+    num, _ = integrate.quad(lambda t: pdf_joint(t, r2_given), r1_min, r1_target)
+    val = num / denom
+    return min(max(val, 0), 1) # Asegurar que esté entre 0 y 1
+
+def conditional_copula_val(u1, u2):
+    """
+    Calcula C(u1|u2) = P(U1 <= u1 | U2 = u2).
+    Matemáticamente equivale a F(r1 | r2) transformando los inputs al espacio real.
+    """
+    # 1. Transformar u2 -> r2 (espacio real original)
+    r2 = inv_cdf_r2(u2)
+    # 2. Transformar u1 -> r1 (espacio real original)
+    r1 = inv_cdf_r1(u1)
+    
+    # 3. Calcular probabilidad condicional en el espacio real
+    # Usamos la función cdf_cond_r1_given_r2 que definimos en el bloque anterior
+    val = cdf_cond_r1_given_r2(r1, r2)
+    return val
 
 # ---------- Exercise 7 functions ----------
 def gaussian_copula_uv(*, rho: float, size: int, seed: int | None = None) -> tuple[ArrayF, ArrayF]:
@@ -348,6 +420,22 @@ def clayton_quantile_curve_u2(
     u2 = (1.0 + (u1 ** (-theta)) * a) ** (-1.0 / theta)
     return np.clip(u2, eps, 1.0 - eps)
 
+# ---------- Exercise 11 functions ----------
+
+def inverse_triangular(u):
+    """
+    Transforma uniformes u en variables Triangulares(1, 5, 3).
+    """
+    x = np.zeros_like(u)
+    # Máscara para el primer tramo [1, 3] donde area acumulada es 0.5
+    mask1 = (u <= 0.5)
+    # Máscara para el segundo tramo (3, 5]
+    mask2 = (u > 0.5)
+    
+    # Aplicación de fórmulas inversas
+    x[mask1] = 1 + np.sqrt(8 * u[mask1])
+    x[mask2] = 5 - np.sqrt(8 * (1 - u[mask2]))
+    return x
 
 # ------------------------- Exercise 12 functions -------------------------
 def t_copula_uv(*, rho: float, nu: int, size: int, seed: int | None = None):
@@ -449,3 +537,22 @@ def simulate_nm_copula(N, *, pi, rho1, rho2, seed=None):
         U[idx] = norm.cdf(x)
 
     return U[:, 0], U[:, 1]
+
+# ------------------------------- Exercise 17 functions -------------------------------
+
+def simulate_truncated(u, p):
+    """Genera variable normal truncada dado uniforme u y params p"""
+    # Estandarizar límites
+    a_std = (p['a'] - p['mu']) / p['sigma']
+    b_std = (p['b'] - p['mu']) / p['sigma']
+    
+    phi_a = norm.cdf(a_std)
+    phi_b = norm.cdf(b_std)
+    
+    # Interpolación
+    term = phi_a + u * (phi_b - phi_a)
+    
+    # Inversa Phi^-1
+    # Clip para estabilidad numérica (evitar log(0) o inf)
+    term = np.clip(term, 1e-9, 1 - 1e-9)
+    return p['mu'] + p['sigma'] * norm.ppf(term)
